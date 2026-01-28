@@ -1,0 +1,18 @@
+# Ignore bash scripts
+*.bash
+
+# Ignore object files
+*.o
+
+# Ignore compiled executables
+tarasaur
+a.out
+
+# Ignore vim swap files
+*.swp
+
+# Ignore test input files
+*.txt
+
+# Ignore tar files
+*.gz
