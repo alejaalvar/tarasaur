@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <errno.h>
+#include <stdbool.h>
 
 /*
  * Display help info for usage of tarasaur
@@ -41,6 +42,8 @@ int
 main(int argc, char *argv[])
 {
     int opt;
+    char *file_name = NULL;
+    bool is_verbose = false;
 
     while ((opt = getopt(argc, argv, "cxtTVf:vh")) != -1)
     {
@@ -62,6 +65,7 @@ main(int argc, char *argv[])
                 break;
 
             case 'f':
+                file_name = optarg;
                 break;
 
             case 'h':
@@ -70,7 +74,7 @@ main(int argc, char *argv[])
                 break;
 
             case 'v':
-                printf("Some verbose text\n");
+                is_verbose = true;
                 break;
 
             default:
