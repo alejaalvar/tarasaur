@@ -47,24 +47,51 @@ main(int argc, char *argv[])
     int opt;
     char *file_name = NULL;
     bool is_verbose = false;
+    tarasaur_action_t action = ACTION_NONE;
 
     while ((opt = getopt(argc, argv, "cxtTVf:vh")) != -1)
     {
         switch (opt)
         {
             case 'x':
+                action = ACTION_EXTRACT;
                 break;
 
             case 'c':
+                action = ACTION_CREATE;
                 break;
 
             case 't':
+                /*
+                Example output for the short table of contents without verbose:
+
+                    Reading archive file: "test-archive.tarasaur"
+                    Table of contents of tarannosaurus file: "test-archive.tarasaur" with 3 members
+                            file name: 0-s.txt
+                            file name: 1-s.txt
+                            file name: 2-s.txt
+
+                Example output for the short able of contents with verbose:
+
+                    Reading archive file: "test-archive.tarasaur"
+                            skipping over data for member 0 of 0 bytes
+                            skipping over data for member 1 of 41 bytes
+                            skipping over data for member 2 of 82 bytes
+                    Table of contents of tarannosaurus file: "test-archive.tarasaur" with 3 members
+                            file name: 0-s.txt
+                            file name: 1-s.txt
+                            file name: 2-s.txt
+
+                */
+                action = ACTION_TOC_SHORT;
                 break;
 
             case 'T':
+                action = ACTION_TOC_LONG;
                 break;
 
             case 'V':
+                action = ACTION_VALIDATE;
                 break;
 
             case 'f':
@@ -98,21 +125,54 @@ main(int argc, char *argv[])
     {
         fprintf(stderr, 
                 "Verbose: %d\n"
+                "Action: %d\n"
                 "File name: %s\n",
-                is_verbose, file_name);
+                is_verbose, action, file_name);
     }
 
-    if (1 == optind) {
-        fprintf(stderr, "*** %s No action specified\n", 
-                argv[0]);
-        exit(NO_ACTION_GIVEN);
-    }
+    // if (ACTION_NONE == action) {
+    //     fprintf(stderr, "*** %s No action specified\n", 
+    //             argv[0]);
+    //     exit(NO_ACTION_GIVEN);
+    // }
 
-    if (is_verbose) {
-        fprintf(stderr,
-                "Verbose flag was set to %d\n"
-                "Outputting diagnostics to stderr\n",
-                is_verbose);
+    switch (action)
+    {
+        case ACTION_CREATE:
+            {
+                fprintf(stderr, "Creating...\n");
+            }
+            break;
+    
+        case ACTION_EXTRACT:
+            {
+                fprintf(stderr, "Extracting...\n");
+            }
+            break;
+
+        case ACTION_TOC_SHORT:
+            {
+                fprintf(stderr, "Short TOC...\n");
+            }
+            break;
+
+        case ACTION_TOC_LONG:
+            {
+                fprintf(stderr, "Long TOC...\n");
+            }
+            break;
+
+        case ACTION_VALIDATE:
+            {
+                fprintf(stderr, "Validating...\n");
+            }
+            break;
+
+        default:
+            fprintf(stderr, "*** %s No action specified\n", 
+                    argv[0]);
+            exit(NO_ACTION_GIVEN);
+            break;
     }
 
     return EXIT_SUCCESS;
