@@ -17,6 +17,11 @@
 #include <ctype.h>
 #include <errno.h>
 
+/*
+ * Display help info for usage of tarasaur
+ *
+ * @param program_name - the name of the program from argv
+ */
 static void usage(const char *program_name) {
     fprintf(stderr, 
             "Usage: %s -[cxtTVf:vh] archive-file file...\n"
@@ -74,7 +79,6 @@ main(int argc, char *argv[])
                 break;
         }
     }
-
 
     return EXIT_SUCCESS;
 }
