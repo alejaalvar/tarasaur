@@ -16,3 +16,6 @@ a.out
 
 # Ignore tar files
 *.gz
+
+# Ignore json (for the vscode extension)
+*.json
