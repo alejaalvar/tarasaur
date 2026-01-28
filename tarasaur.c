@@ -102,10 +102,17 @@ main(int argc, char *argv[])
                 is_verbose, file_name);
     }
 
-    if (optind == 1) {
+    if (1 == optind) {
         fprintf(stderr, "*** %s No action specified\n", 
                 argv[0]);
         exit(NO_ACTION_GIVEN);
+    }
+
+    if (is_verbose) {
+        fprintf(stderr,
+                "Verbose flag was set to %d\n"
+                "Outputting diagnostics to stderr\n",
+                is_verbose);
     }
 
     return EXIT_SUCCESS;
