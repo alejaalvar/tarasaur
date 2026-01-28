@@ -17,12 +17,27 @@
 #include <ctype.h>
 #include <errno.h>
 
+static void usage(const char *program_name) {
+    fprintf(stderr, 
+            "Usage: %s -[cxtTVf:vh] archive-file file...\n"
+            "        -c           create a new archive file\n"
+            "        -x           extract members from an existing archive file\n"
+            "        -t           short table of contents of archive file\n"
+            "        -T           long table of contents of archive file\n"
+            "        -V           validate the checksum/hash values\n"
+            "        -f filename  name of archive file to use\n"
+            "        -v           verbose output\n"
+            "        -h           show help text\n",
+            program_name);
+    return;
+}
+
 int
 main(int argc, char *argv[])
 {
     int opt;
 
-    while ((opt = getopt(argc, argv, "xctTVfhv")) != -1)
+    while ((opt = getopt(argc, argv, "cxtTVf:vh")) != -1)
     {
         switch (opt)
         {
@@ -45,7 +60,8 @@ main(int argc, char *argv[])
                 break;
 
             case 'h':
-                printf("Some help text\n");
+                usage(argv[0]);
+                exit(EXIT_SUCCESS);
                 break;
 
             case 'v':
