@@ -81,10 +81,31 @@ main(int argc, char *argv[])
                 break;
 
             default:
-                fprintf(stderr, "Invalid command line option %c", opt);
-                return EXIT_FAILURE;
+                fprintf(stderr, "Invalid command line option %c\n", opt);
+                exit(INVALID_CMD_OPTION);
                 break;
         }
+    }
+
+    /*
+    This block of code silences compiler
+    warnings during testing of each piece
+    of functionality before the is_verbose
+    and file_name variables are being used.
+    It will be removed when the functionality
+    requring those vars is implemented
+    */
+    {
+        fprintf(stderr, 
+                "Verbose: %d\n"
+                "File name: %s\n",
+                is_verbose, file_name);
+    }
+
+    if (optind == 1) {
+        fprintf(stderr, "*** %s No action specified\n", 
+                argv[0]);
+        exit(NO_ACTION_GIVEN);
     }
 
     return EXIT_SUCCESS;
