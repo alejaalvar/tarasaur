@@ -6,22 +6,22 @@ CFLAGS = -Wall -Wextra -Wshadow -Wunreachable-code -Wredundant-decls \
          -Wno-return-local-addr -Wunsafe-loop-optimizations \
          -Wuninitialized -Werror
 
+LDFLAGS = -lz
+PROG1 = tarasaur
+
 TAR_FILE = Lab2_${LOGNAME}.tar.gz
 
-.PHONY: all clean
+all: $(PROG1)
 
-all: tarasaur
+$(PROG1): $(PROG1).o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-tarasaur: tarasaur.o
-	$(CC) $(CFLAGS) -o tarasaur tarasaur.o
-
-tarasaur.o: tarasaur.c
-	$(CC) $(CFLAGS) -c tarasaur.c
+$(PROG1).o: $(PROG1).c
+	$(CC) $(CFLAGS) -c $<
 
 clean:
-	rm -f tarasaur *.o *~ \#*
+	rm -f $(PROG1) *.o *~ \#*
 
 tar: clean
 	rm -f $(TAR_FILE)
 	tar cvfa $(TAR_FILE) *.[ch] ?akefile
-

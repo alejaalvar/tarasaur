@@ -17,6 +17,9 @@
 #include <ctype.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <zlib.h>
+#include <stdint.h>
+#include "tarasaur.h"
 
 /*
  * Display help info for usage of tarasaur
