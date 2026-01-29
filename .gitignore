@@ -19,3 +19,6 @@ a.out
 
 # Ignore json (for the vscode extension)
 *.json
+
+# Ignore custom .tarasaur archive files
+*.tarasaur
