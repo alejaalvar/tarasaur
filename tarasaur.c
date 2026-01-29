@@ -34,6 +34,9 @@
 // The size of the struct on disk including compiler padding
 #define PADDED_HEADER_SIZE 104
 
+//
+#define MAGIC_BUF_SIZE 128
+
 /*
  * Display help info for usage of tarasaur
  *
@@ -422,7 +425,7 @@ main(int argc, char *argv[])
         case ACTION_TOC_LONG:
         case ACTION_VALIDATE:
             {
-                char magic_buf[128] = {0}; 
+                char magic_buf[MAGIC_BUF_SIZE] = {0};  // ensure this is null terminated
                 int magic_len = strlen(TARASAUR_MAGIC_NUMBER);
                 short version;
                 int member_count;
