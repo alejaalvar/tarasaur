@@ -620,6 +620,272 @@ do_extract(int fd,
     }
 }
 
+/*
+ * Create a new archive file from a list of input files.
+ *
+ * @param archive_name - the archive file to create
+ * @param file_list - array of filenames to add to archive
+ * @param num_files - number of files in file_list
+ * @param is_verbose - boolean to track verbose flag
+ */
+static void
+do_create(const char *archive_name,
+          char **file_list,
+          int num_files,
+          bool is_verbose) {
+
+    tarasaur_directory_t *headers = NULL;
+    size_t *file_sizes = NULL;
+    int archive_fd;
+    off_t current_offset;
+    int i;
+    short version;
+    struct stat st;
+    int file_fd;
+    char buffer[BUFFER_SIZE];
+    size_t remaining;
+    void *file_data;
+    size_t bytes_read_total;
+    tarasaur_directory_t header_copy;
+
+    // Validate inputs
+    if (!archive_name) {
+        fprintf(stderr, "Error: No archive filename specified\n");
+        exit(NO_ARCHIVE_NAME);
+    }
+
+    if (num_files == 0) {
+        fprintf(stderr, "Error: No files specified to archive\n");
+        exit(CREATE_FAIL);
+    }
+
+    // Allocate arrays for headers and file sizes
+    headers = calloc(num_files, sizeof(tarasaur_directory_t));
+    if (!headers) {
+        perror("calloc");
+        exit(EXIT_FAILURE);
+    }
+
+    file_sizes = calloc(num_files, sizeof(size_t));
+    if (!file_sizes) {
+        perror("calloc");
+        free(headers);
+        exit(EXIT_FAILURE);
+    }
+
+    // Pass 1: Collect file metadata and calculate offsets
+    current_offset = strlen(TARASAUR_MAGIC_NUMBER) + sizeof(short) + sizeof(int);
+
+    for (i = 0; i < num_files; ++i) {
+        // Open input file
+        file_fd = open(file_list[i], O_RDONLY);
+        if (file_fd == -1) {
+            perror(file_list[i]);
+            free(headers);
+            free(file_sizes);
+            exit(CREATE_FAIL);
+        }
+
+        // Get file metadata
+        if (fstat(file_fd, &st) == -1) {
+            perror("fstat");
+            close(file_fd);
+            free(headers);
+            free(file_sizes);
+            exit(CREATE_FAIL);
+        }
+
+        close(file_fd);
+
+        // Check if it's a regular file
+        if (!S_ISREG(st.st_mode)) {
+            fprintf(stderr, "Error: %s is not a regular file\n", file_list[i]);
+            free(headers);
+            free(file_sizes);
+            exit(CREATE_FAIL);
+        }
+
+        // Store file size
+        file_sizes[i] = st.st_size;
+
+        // Calculate data offset for this file
+        headers[i].tarasaur_data_offset = current_offset + sizeof(size_t);
+        current_offset = headers[i].tarasaur_data_offset + st.st_size;
+
+        // Store filename (truncate if necessary)
+        strncpy(headers[i].tarasaur_name, file_list[i], TARASAUR_MAX_NAME_LEN - 1);
+        headers[i].tarasaur_name[TARASAUR_MAX_NAME_LEN - 1] = '\0';
+
+        // Store metadata
+        headers[i].tarasaur_size = st.st_size;
+        headers[i].tarasaur_mode = st.st_mode;
+        headers[i].tarasaur_uid = st.st_uid;
+        headers[i].tarasaur_gid = st.st_gid;
+        headers[i].tarasaur_atim = st.st_atim;
+        headers[i].tarasaur_mtim = st.st_mtim;
+
+        // CRCs will be calculated during write pass
+        headers[i].crc32_data = 0;
+        headers[i].crc32_header = 0;
+    }
+
+    // Open archive file for writing
+    archive_fd = open(archive_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (archive_fd == -1) {
+        perror(archive_name);
+        free(headers);
+        free(file_sizes);
+        exit(CREATE_FAIL);
+    }
+
+    if (is_verbose) {
+        fprintf(stderr, "Creating archive file: \"%s\"\n", archive_name);
+    }
+
+    // Write header: magic number, version, member count
+    if (write(archive_fd, TARASAUR_MAGIC_NUMBER, strlen(TARASAUR_MAGIC_NUMBER))
+        != (ssize_t)strlen(TARASAUR_MAGIC_NUMBER)) {
+        perror("write");
+        close(archive_fd);
+        free(headers);
+        free(file_sizes);
+        exit(CREATE_FAIL);
+    }
+
+    version = TARASAUR_VERSION;
+    if (write(archive_fd, &version, sizeof(short)) != sizeof(short)) {
+        perror("write");
+        close(archive_fd);
+        free(headers);
+        free(file_sizes);
+        exit(CREATE_FAIL);
+    }
+
+    if (write(archive_fd, &num_files, sizeof(int)) != sizeof(int)) {
+        perror("write");
+        close(archive_fd);
+        free(headers);
+        free(file_sizes);
+        exit(CREATE_FAIL);
+    }
+
+    // Pass 2: Write data section and calculate data CRCs
+    for (i = 0; i < num_files; ++i) {
+        file_data = NULL;
+        bytes_read_total = 0;
+
+        if (is_verbose) {
+            fprintf(stderr, "\tAdding member %d: \"%s\"   size: %10zd\n",
+                    i, file_list[i], file_sizes[i]);
+        }
+
+        // Write size
+        if (write(archive_fd, &file_sizes[i], sizeof(size_t)) != sizeof(size_t)) {
+            perror("write");
+            close(archive_fd);
+            free(headers);
+            free(file_sizes);
+            exit(CREATE_FAIL);
+        }
+
+        // Open input file
+        file_fd = open(file_list[i], O_RDONLY);
+        if (file_fd == -1) {
+            perror(file_list[i]);
+            close(archive_fd);
+            free(headers);
+            free(file_sizes);
+            exit(CREATE_FAIL);
+        }
+
+        // Allocate buffer for entire file to calculate CRC
+        if (file_sizes[i] > 0) {
+            file_data = malloc(file_sizes[i]);
+            if (!file_data) {
+                perror("malloc");
+                close(file_fd);
+                close(archive_fd);
+                free(headers);
+                free(file_sizes);
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        // Read and write file data
+        remaining = file_sizes[i];
+        while (remaining > 0) {
+            size_t to_read = MIN(remaining, sizeof(buffer));
+            ssize_t bytes_read = read(file_fd, buffer, to_read);
+
+            if (bytes_read <= 0) {
+                fprintf(stderr, "Error: Failed to read from %s\n", file_list[i]);
+                free(file_data);
+                close(file_fd);
+                close(archive_fd);
+                free(headers);
+                free(file_sizes);
+                exit(READ_FAIL);
+            }
+
+            // Copy to file_data buffer for CRC calculation
+            if (file_data) {
+                memcpy((char *)file_data + bytes_read_total, buffer, bytes_read);
+                bytes_read_total += bytes_read;
+            }
+
+            // Write to archive
+            if (write(archive_fd, buffer, bytes_read) != bytes_read) {
+                perror("write");
+                free(file_data);
+                close(file_fd);
+                close(archive_fd);
+                free(headers);
+                free(file_sizes);
+                exit(CREATE_FAIL);
+            }
+
+            remaining -= bytes_read;
+        }
+
+        close(file_fd);
+
+        // Calculate data CRC
+        if (file_sizes[i] > 0) {
+            headers[i].crc32_data = get_crc(file_data, file_sizes[i]);
+            free(file_data);
+        } else {
+            headers[i].crc32_data = get_crc(NULL, 0);
+        }
+    }
+
+    // Pass 3: Write metadata section with header CRCs
+    for (i = 0; i < num_files; ++i) {
+        // Calculate header CRC (must zero out CRC fields first)
+        header_copy = headers[i];
+        header_copy.crc32_data = 0;
+        header_copy.crc32_header = 0;
+        headers[i].crc32_header = get_crc(&header_copy, sizeof(tarasaur_directory_t));
+
+        // Write header
+        if (write(archive_fd, &headers[i], sizeof(tarasaur_directory_t))
+            != sizeof(tarasaur_directory_t)) {
+            perror("write");
+            close(archive_fd);
+            free(headers);
+            free(file_sizes);
+            exit(CREATE_FAIL);
+        }
+    }
+
+    // Print summary
+    printf("Created archive file: \"%s\" with %d members\n", archive_name, num_files);
+
+    // Cleanup
+    close(archive_fd);
+    free(headers);
+    free(file_sizes);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -683,12 +949,11 @@ main(int argc, char *argv[])
     {
         case ACTION_CREATE:
             {
-                fprintf(stderr, 
-                        "Creating...\n");  // placeholder
+                // Files to archive come from remaining argv after getopt
+                int num_files = argc - optind;
+                char **file_list = &argv[optind];
 
-                /*
-                TODO: Implement the file creation logic
-                */
+                do_create(file_name, file_list, num_files, is_verbose);
             }
             break;
     
