@@ -144,6 +144,16 @@ time_to_str(struct timespec *ts, char *str, size_t len) {
     }
 }
 
+// Forward declarations for main worker functions
+static void do_toc(int fd, int member_count, const char *archive_name,
+                   bool is_verbose, bool is_long);
+static int do_validate(int fd, int member_count, const char *archive_name,
+                       bool is_verbose);
+static void do_extract(int fd, int member_count, const char *archive_name,
+                       bool is_verbose);
+static void do_create(const char *archive_name, char **file_list,
+                      int num_files, bool is_verbose);
+
 /*
  * Process the Table of Contents action (Short and Long).
  * Iterates through the archive to print member information.
@@ -154,7 +164,7 @@ time_to_str(struct timespec *ts, char *str, size_t len) {
  * @param is_verbose - boolean to track verbose flag
  * @param is_long - boolean to track if long listing (-T) is requested
  */
-static void 
+static void
 do_toc(int fd,
        int member_count, 
        const char *archive_name, 
@@ -464,6 +474,80 @@ do_validate(int fd,
 }
 
 /*
+ * Open an archive and read/validate its header.
+ * Returns the file descriptor and member count via out parameters.
+ *
+ * @param archive_name - the archive filename (NULL for stdin)
+ * @param is_verbose - boolean to track verbose flag
+ * @param fd_out - output parameter for file descriptor
+ * @param member_count_out - output parameter for member count
+ */
+static void
+open_and_read_archive_header(const char *archive_name,
+                              bool is_verbose,
+                              int *fd_out,
+                              int *member_count_out) {
+    char magic_buf[MAGIC_BUF_SIZE] = {'\0'};
+    int magic_len = strlen(TARASAUR_MAGIC_NUMBER);
+    short version;
+    int member_count;
+    int fd;
+
+    // Open archive file or use stdin
+    if (archive_name) {
+        fd = open(archive_name, O_RDONLY);
+        if (-1 == fd) {
+            perror("Error opening archive");
+            exit(EXIT_FAILURE);
+        }
+        // Print message for all operations
+        fprintf(stderr,
+                "Reading archive file: \"%s\"\n",
+                archive_name);
+    } else {
+        fd = STDIN_FILENO;
+        fprintf(stderr,
+                "Reading archive from stdin\n");
+    }
+
+    // Verify Magic Number
+    if (read(fd, magic_buf, magic_len) != magic_len) {
+        fprintf(stderr,
+                "*** failed to read magic number\n");
+        exit(BAD_MAGIC);
+    }
+
+    if (strcmp(magic_buf, TARASAUR_MAGIC_NUMBER) != 0) {
+        fprintf(stderr, "Not a tarannosaurus file: \"%s\"\n",
+                archive_name ? archive_name : "stdin");
+        exit(BAD_MAGIC);
+    }
+
+    // Verify Version
+    if (read(fd, &version, sizeof(short)) != sizeof(short)) {
+        fprintf(stderr, "Error: Failed to read version\n");
+        exit(BAD_MAGIC);
+    }
+
+    if (version != TARASAUR_VERSION) {
+        fprintf(stderr, "Error: Bad version number %d\n", version);
+        exit(BAD_MAGIC);
+    }
+
+    // Get Member Count
+    if (read(fd, &member_count, sizeof(int)) != sizeof(int)) {
+        fprintf(stderr, "Error: Failed to read member count\n");
+        exit(READ_FAIL);
+    }
+
+    // Return values via out parameters
+    *fd_out = fd;
+    *member_count_out = member_count;
+
+    (void)is_verbose;  // Suppress unused parameter warning if needed
+}
+
+/*
  * Extract files from an archive and restore their metadata.
  *
  * @param fd - the file descriptor
@@ -618,6 +702,131 @@ do_extract(int fd,
     if (archive_name) {
         close(fd);
     }
+}
+
+/*
+ * Parse command line options and return the selected action.
+ *
+ * @param argc - argument count from main
+ * @param argv - argument vector from main
+ * @param file_name_out - output parameter for archive filename
+ * @param is_verbose_out - output parameter for verbose flag
+ * @return The selected action (ACTION_CREATE, ACTION_EXTRACT, etc.)
+ */
+static tarasaur_action_t
+parse_command_line_options(int argc,
+                           char *argv[],
+                           char **file_name_out,
+                           bool *is_verbose_out) {
+    int opt;
+    tarasaur_action_t action = ACTION_NONE;
+    char *file_name = NULL;
+    bool is_verbose = false;
+
+    while ((opt = getopt(argc, argv, OPTIONS)) != -1) {
+        switch (opt) {
+            case 'x':
+                action = ACTION_EXTRACT;
+                break;
+
+            case 'c':
+                action = ACTION_CREATE;
+                break;
+
+            case 't':
+                action = ACTION_TOC_SHORT;
+                break;
+
+            case 'T':
+                action = ACTION_TOC_LONG;
+                break;
+
+            case 'V':
+                action = ACTION_VALIDATE;
+                break;
+
+            case 'f':
+                file_name = optarg;
+                break;
+
+            case 'h':
+                usage(argv[0]);
+                exit(EXIT_SUCCESS);
+                break;
+
+            case 'v':
+                is_verbose = true;
+                break;
+
+            default:
+                short_usage(argv[0]);
+                exit(INVALID_CMD_OPTION);
+                break;
+        }
+    }
+
+    *file_name_out = file_name;
+    *is_verbose_out = is_verbose;
+    return action;
+}
+
+/*
+ * Handle archive reading operations (extract, TOC, validate).
+ * Opens archive, validates header, and dispatches to appropriate handler.
+ *
+ * @param action - the specific action to perform
+ * @param file_name - the archive filename (NULL for stdin)
+ * @param is_verbose - verbose flag
+ */
+static void
+handle_archive_reading_action(tarasaur_action_t action,
+                               char *file_name,
+                               bool is_verbose) {
+    int fd;
+    int member_count;
+
+    // Open archive and read/validate header
+    open_and_read_archive_header(file_name, is_verbose, &fd, &member_count);
+
+    // Dispatch to specific handlers
+    switch (action) {
+        case ACTION_TOC_SHORT:
+            do_toc(fd, member_count, file_name, is_verbose, false);
+            break;
+
+        case ACTION_TOC_LONG:
+            do_toc(fd, member_count, file_name, is_verbose, true);
+            break;
+
+        case ACTION_EXTRACT:
+            do_extract(fd, member_count, file_name, is_verbose);
+            break;
+
+        case ACTION_VALIDATE:
+            exit(do_validate(fd, member_count, file_name, is_verbose));
+            break;
+
+        default:
+            break;
+    }
+
+    if (file_name) close(fd);
+}
+
+/*
+ * Handle archive creation.
+ *
+ * @param file_name - the archive filename to create
+ * @param file_list - array of files to add to archive
+ * @param num_files - number of files in file_list
+ * @param is_verbose - verbose flag
+ */
+static void
+handle_create_action(char *file_name,
+                     char **file_list,
+                     int num_files,
+                     bool is_verbose) {
+    do_create(file_name, file_list, num_files, is_verbose);
 }
 
 /*
@@ -889,184 +1098,33 @@ do_create(const char *archive_name,
 int
 main(int argc, char *argv[])
 {
-    int opt;  // setup for getopt
-    char *file_name = NULL;  // this must be NULL for error handling
-    bool is_verbose = false;  // this activates extra diagnostics
-    tarasaur_action_t action = ACTION_NONE;  // must be default value for error handling
+    char *file_name = NULL;
+    bool is_verbose = false;
+    tarasaur_action_t action;
 
-    // Extract the op first - no processing yet
-    while ((opt = 
-        getopt(argc, argv, OPTIONS)) != -1)
-    {
-        switch (opt)
-        {
-            case 'x':
-                action = ACTION_EXTRACT;
-                break;
+    // Parse command line options
+    action = parse_command_line_options(argc, argv, &file_name, &is_verbose);
 
-            case 'c':
-                action = ACTION_CREATE;
-                break;
-
-            case 't':
-                action = ACTION_TOC_SHORT;
-                break;
-
-            case 'T':
-                action = ACTION_TOC_LONG;
-                break;
-
-            case 'V':
-                action = ACTION_VALIDATE;
-                break;
-
-            case 'f':
-                file_name = optarg;
-                break;
-
-            case 'h':
-                usage(argv[0]);
-                exit(EXIT_SUCCESS);
-                break;
-
-            case 'v':
-                is_verbose = true;
-                break;
-
-            // This corresponds to ACTION_NONE - the default value
-            default:
-                short_usage(argv[0]);
-                // fprintf(stderr, 
-                //         "Invalid command line option %c\n", 
-                //         opt);
-                exit(INVALID_CMD_OPTION);
-                break;
-        }
-    }
-
-    // Now we can proceed with processing
-    switch (action)
-    {
+    // Dispatch based on action
+    switch (action) {
         case ACTION_CREATE:
             {
                 // Files to archive come from remaining argv after getopt
                 int num_files = argc - optind;
                 char **file_list = &argv[optind];
-
-                do_create(file_name, file_list, num_files, is_verbose);
+                handle_create_action(file_name, file_list, num_files, is_verbose);
             }
             break;
-    
-        /*
-        All of these share the same error handling:
-            file open failure,
-            read failures,
-            incorrect magic number,
-            incorrect version number,
-        */
+
         case ACTION_EXTRACT:
         case ACTION_TOC_SHORT:
         case ACTION_TOC_LONG:
         case ACTION_VALIDATE:
-            {
-                char magic_buf[MAGIC_BUF_SIZE] = {'\0'};  // ensures a null terminator at the end
-                int magic_len = strlen(TARASAUR_MAGIC_NUMBER);
-                short version;
-                int member_count;
-                int fd;
-
-                // Can we open the file? Was a file even provided?
-                if (file_name) {
-                    fd = open(file_name, O_RDONLY);
-                    if (-1 == fd) {
-                        perror("Error opening archive");
-                        exit(EXIT_FAILURE);
-                    }
-                    // Print message for all operations
-                    fprintf(stderr,
-                            "Reading archive file: \"%s\"\n",
-                            file_name);
-                }
-                // No file provided - default to read from STDIN
-                else {
-                    fd = STDIN_FILENO;
-                    fprintf(stderr, 
-                            "Reading archive from stdin\n");
-                }
-
-                // --- HEADER VALIDATION START ---
-
-                /*
-                There are three parts of the header:
-
-                    Magic Number,
-                    Version Number,
-                    Member Count
-
-                We verify the Magic Number and Version Number
-                */
-                
-                // Verify Magic Number (from the header file)
-                if (read(fd, magic_buf, magic_len) != magic_len) {
-                     fprintf(stderr,
-                             "*** failed to read magic number\n");
-                     exit(BAD_MAGIC);
-                }
-                
-                // Wrong file type
-                if (strcmp(magic_buf, TARASAUR_MAGIC_NUMBER) != 0) {
-                    fprintf(stderr, "Not a tarannosaurus file: \"%s\"\n", 
-                            file_name ? file_name : "stdin");
-                    exit(BAD_MAGIC);
-                }
-
-                // Verify Version (from the header file)
-                if (read(fd, &version, sizeof(short)) != sizeof(short)) {
-                    fprintf(stderr, "Error: Failed to read version\n");
-                    exit(BAD_MAGIC);
-                }
-                
-                if (version != TARASAUR_VERSION) {
-                    fprintf(stderr, "Error: Bad version number %d\n", version);
-                    exit(BAD_MAGIC); 
-                }
-
-                // 3. Get Member Count
-                if (read(fd, &member_count, sizeof(int)) != sizeof(int)) {
-                    fprintf(stderr, "Error: Failed to read member count\n");
-                    exit(READ_FAIL);
-                }
-                
-                // --- HEADER VALIDATION END ---
-
-                // Dispatch to specific handlers
-                switch (action) {
-                    case ACTION_TOC_SHORT:
-                        do_toc(fd, member_count, file_name, is_verbose, false);
-                        break;
-
-                    case ACTION_TOC_LONG:
-                        do_toc(fd, member_count, file_name, is_verbose, true);
-                        break;
-
-                    case ACTION_EXTRACT:
-                        do_extract(fd, member_count, file_name, is_verbose);
-                        break;
-
-                    case ACTION_VALIDATE:
-                        return do_validate(fd, member_count, file_name, is_verbose);
-
-                    default:
-                        break;
-                }
-
-                if (file_name) close(fd);
-            }
+            handle_archive_reading_action(action, file_name, is_verbose);
             break;
 
         default:
-            fprintf(stderr, "*** %s No action specified\n", 
-                    argv[0]);
+            fprintf(stderr, "*** %s No action specified\n", argv[0]);
             exit(NO_ACTION_GIVEN);
             break;
     }
