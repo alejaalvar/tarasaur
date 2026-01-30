@@ -22,3 +22,6 @@ a.out
 
 # Ignore custom .tarasaur archive files
 *.tarasaur
+
+# Ignore pdf files
+*.pdf
