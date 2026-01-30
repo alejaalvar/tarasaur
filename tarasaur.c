@@ -34,6 +34,31 @@
 #define PERMISSIONS_LEN 11
 #define TIMESTAMP_LEN 64
 
+// Valid command line options
+#define OPTIONS "cxtTVf:vh"
+
+/*
+ * Read from stdin
+ *
+ * @param fd - the file descriptor
+ * @param current_member_size - the number of archived files
+ */
+ static void 
+ read_stdin(int fd, size_t current_member_size) {
+    // It is stdin (pipe), we cannot seek. We must read and discard.
+    char junk_buf[BUFFER_SIZE];
+    size_t bytes_to_skip = current_member_size;
+    while (bytes_to_skip > 0) {
+        size_t read_amt = (bytes_to_skip < sizeof(junk_buf)) 
+                            ? bytes_to_skip : sizeof(junk_buf);
+        if (read(fd, junk_buf, read_amt) <= 0) {
+            fprintf(stderr, "Error: Unexpected EOF skipping data\n");
+            exit(READ_FAIL);
+        }
+        bytes_to_skip -= read_amt;
+    }
+}
+
 /*
  * Display help info for usage of tarasaur
  *
@@ -42,7 +67,7 @@
 static void 
 usage(const char *program_name) {
     fprintf(stderr, 
-            "Usage: %s -[cxtTVf:vh] archive-file file...\n"
+            "Usage: %s -[%s] archive-file file...\n"
             "        -c           create a new archive file\n"
             "        -x           extract members from an existing archive file\n"
             "        -t           short table of contents of archive file\n"
@@ -51,8 +76,21 @@ usage(const char *program_name) {
             "        -f filename  name of archive file to use\n"
             "        -v           verbose output\n"
             "        -h           show help text\n",
-            program_name);
+            program_name, OPTIONS);
     return;
+}
+
+/*
+ * Shorthand help message for usage of tarasaur.
+ * Used when the action flag is still ACTION_NONE.
+ *
+ * @param program_name - the name of the program from argv
+ */
+static void 
+short_usage(const char *program_name) {
+   fprintf(stderr, 
+           "Usage: %s %s\n", 
+           program_name, OPTIONS);
 }
 
 /*
@@ -156,18 +194,7 @@ do_toc(int fd,
                 exit(READ_FAIL);
             }
         } else {
-            // It is stdin (pipe), we cannot seek. We must read and discard.
-            char junk_buf[BUFFER_SIZE];
-            size_t bytes_to_skip = current_member_size;
-            while (bytes_to_skip > 0) {
-                size_t read_amt = (bytes_to_skip < sizeof(junk_buf)) 
-                                    ? bytes_to_skip : sizeof(junk_buf);
-                if (read(fd, junk_buf, read_amt) <= 0) {
-                    fprintf(stderr, "Error: Unexpected EOF skipping data\n");
-                    exit(READ_FAIL);
-                }
-                bytes_to_skip -= read_amt;
-            }
+            read_stdin(fd, current_member_size);
         }
     }
 
@@ -250,7 +277,7 @@ main(int argc, char *argv[])
 
     // Extract the op first - no processing yet
     while ((opt = 
-        getopt(argc, argv, "cxtTVf:vh")) != -1)
+        getopt(argc, argv, OPTIONS)) != -1)
     {
         switch (opt)
         {
@@ -289,9 +316,10 @@ main(int argc, char *argv[])
 
             // This corresponds to ACTION_NONE - the default value
             default:
-                fprintf(stderr, 
-                        "Invalid command line option %c\n", 
-                        opt);
+                short_usage(argv[0]);
+                // fprintf(stderr, 
+                //         "Invalid command line option %c\n", 
+                //         opt);
                 exit(INVALID_CMD_OPTION);
                 break;
         }
