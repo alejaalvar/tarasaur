@@ -33,6 +33,7 @@
 #define MAGIC_BUF_SIZE 128
 #define PERMISSIONS_LEN 11
 #define TIMESTAMP_LEN 64
+#define NUM_TIMESTAMPS 2
 
 // Valid command line options
 #define OPTIONS "cxtTVf:vh"
@@ -561,8 +562,8 @@ do_extract(int fd,
            const char *archive_name,
            bool is_verbose) {
 
-    tarasaur_directory_t *headers = NULL;
-    size_t *data_sizes = NULL;
+    tarasaur_directory_t *headers = NULL;  // this is how we store metadata
+    size_t *data_sizes = NULL;  // how we store size of each files data
 
     // Allocate arrays for metadata and data sizes
     headers = calloc(member_count, sizeof(tarasaur_directory_t));
@@ -579,7 +580,7 @@ do_extract(int fd,
     }
 
     // Step 1: Skip over all data sections while collecting sizes
-    for (int i = 0; i < member_count; ++i) {
+    for (int i = 0; i < member_count; ++i) {  // iterate through each file
         // Read size of this member's data
         if (read(fd, &data_sizes[i], sizeof(size_t)) != sizeof(size_t)) {
             fprintf(stderr, "Error: Failed to read size for member %d\n", i);
@@ -619,7 +620,7 @@ do_extract(int fd,
         char buffer[BUFFER_SIZE];
         int out_fd;
         size_t remaining;
-        struct timespec times[2];
+        struct timespec times[NUM_TIMESTAMPS];  // store our timestamps
 
         // Verbose output to stderr
         if (is_verbose) {
@@ -674,8 +675,9 @@ do_extract(int fd,
         // Close output file
         close(out_fd);
 
-        // Restore permissions
-        if (chmod(headers[i].tarasaur_name, headers[i].tarasaur_mode) == -1) {
+        // Restore permissions as they were originally stored
+        if (chmod(headers[i].tarasaur_name, 
+                  headers[i].tarasaur_mode) == -1) {
             perror("chmod");
             // Continue extraction even if chmod fails
         }
@@ -683,6 +685,12 @@ do_extract(int fd,
         // Restore timestamps
         times[0] = headers[i].tarasaur_atim;  // Access time
         times[1] = headers[i].tarasaur_mtim;  // Modification time
+        /*
+        Set file timestamps with precision
+        Use current dir
+        times - the array with our timestamps
+        0 - no special flags
+        */
         if (utimensat(AT_FDCWD, headers[i].tarasaur_name, times, 0) == -1) {
             perror("utimensat");
             // Continue extraction even if utimensat fails
@@ -847,7 +855,6 @@ do_create(const char *archive_name,
     size_t *file_sizes = NULL;  // track every input file's size
     int archive_fd;
     off_t current_offset;  // we will write this offset into the archive
-    int i;
     short version;
     struct stat st;  // the buffer we read into from fstat
     int file_fd;  // this is where we extract our data blobs from
@@ -892,7 +899,7 @@ do_create(const char *archive_name,
     */
     current_offset = strlen(TARASAUR_MAGIC_NUMBER) + sizeof(short) + sizeof(int);
 
-    for (i = 0; i < num_files; ++i) {
+    for (int i = 0; i < num_files; ++i) {
         // Open input file
         file_fd = open(file_list[i], O_RDONLY);
         if (file_fd == -1) {
@@ -992,7 +999,7 @@ do_create(const char *archive_name,
     }
 
     // Pass 2: Write data sections and calculate data CRCs
-    for (i = 0; i < num_files; ++i) {
+    for (int i = 0; i < num_files; ++i) {
         file_data = NULL;
         bytes_read_total = 0;
 
@@ -1094,7 +1101,7 @@ do_create(const char *archive_name,
     }
 
     // Pass 3: Write metadata section with header CRCs
-    for (i = 0; i < num_files; ++i) {
+    for (int i = 0; i < num_files; ++i) {
         // Calculate header CRC (must zero out CRC fields first)
 
         /*
