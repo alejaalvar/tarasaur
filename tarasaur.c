@@ -30,12 +30,9 @@
 
 // Standard page size for efficient I/O operations
 #define BUFFER_SIZE 4096
-
-// The size of the struct on disk including compiler padding
-#define PADDED_HEADER_SIZE 104
-
-//
 #define MAGIC_BUF_SIZE 128
+#define PERMISSIONS_LEN 11
+#define TIMESTAMP_LEN 64
 
 /*
  * Display help info for usage of tarasaur
@@ -59,69 +56,6 @@ usage(const char *program_name) {
 }
 
 /*
- * Reads a single directory entry from the archive.
- * Handles the raw byte reading and manual unpacking to account for 
- * structure padding in the file format.
- *
- * @param fd - the file descriptor
- * @param header - pointer to the directory struct to fill
- * @return 0 on success, -1 on failure
- */
-static int 
-read_directory_entry(int fd, tarasaur_directory_t *header) {
-    unsigned char buffer[PADDED_HEADER_SIZE]; 
-    unsigned char *ptr = buffer;
-
-    // Perform a single read call for the entire directory entry block
-    if (read(fd, buffer, PADDED_HEADER_SIZE) != PADDED_HEADER_SIZE) {
-        return -1;
-    }
-
-    // 1. Name (Use the macro from tarasaur.h)
-    memcpy(header->tarasaur_name, ptr, TARASAUR_MAX_NAME_LEN);         
-    ptr += TARASAUR_MAX_NAME_LEN; 
-
-    // 2. SKIP PADDING (7 bytes)
-    // Compiler aligns 'size_t' (8 bytes) to offset 32. 
-    // 32 - 25 (MAX_NAME_LEN) = 7 bytes of padding.
-    ptr += 7; 
-
-    // 3. Size (Use sizeof for safety)
-    memcpy(&header->tarasaur_size, ptr, sizeof(size_t));         
-    ptr += sizeof(size_t);
-
-    // 4. Mode, UID, GID (Use sizeof)
-    memcpy(&header->tarasaur_mode, ptr, sizeof(mode_t)); ptr += sizeof(mode_t);
-    memcpy(&header->tarasaur_uid, ptr, sizeof(uid_t));  ptr += sizeof(uid_t);
-    memcpy(&header->tarasaur_gid, ptr, sizeof(gid_t));  ptr += sizeof(gid_t);
-
-    // 5. SKIP PADDING (4 bytes)
-    // Compiler aligns 'timespec' (16 bytes) to offset 56.
-    // 56 - 52 (current offset) = 4 bytes of padding.
-    ptr += 4;
-
-    // 6. Timespecs 
-    memcpy(&header->tarasaur_atim, ptr, sizeof(struct timespec)); 
-    ptr += sizeof(struct timespec);
-    
-    memcpy(&header->tarasaur_mtim, ptr, sizeof(struct timespec)); 
-    ptr += sizeof(struct timespec);
-
-    // 7. Offset
-    memcpy(&header->tarasaur_data_offset, ptr, sizeof(off_t)); 
-    ptr += sizeof(off_t);
-
-    // 8. CRC 
-    memcpy(&header->crc32_data, ptr, sizeof(uint32_t));   
-    ptr += sizeof(uint32_t);
-    
-    memcpy(&header->crc32_header, ptr, sizeof(uint32_t)); 
-    ptr += sizeof(uint32_t);
-
-    return 0; 
-}
-
-/*
  * Converts a mode_t value into a ls-style string (e.g., "-rwxr-xr-x").
  *
  * @param mode - the file mode/permissions
@@ -130,7 +64,15 @@ read_directory_entry(int fd, tarasaur_directory_t *header) {
 static void
 perm_to_str(mode_t mode, char *str) {
     // Standard ls-style permission mapping
-    str[0] = S_ISDIR(mode) ? 'd' : '-';
+    str[0] = S_ISDIR(mode) ? 'd' : '-';  // check file type bits
+
+    /*
+    By using the bitwise AND operator,
+    we can determine which permission is set
+    because if the bit is set (str[i]), then
+    AND must return true (refer to truth table)
+    */
+
     str[1] = (mode & S_IRUSR) ? 'r' : '-';
     str[2] = (mode & S_IWUSR) ? 'w' : '-';
     str[3] = (mode & S_IXUSR) ? 'x' : '-';
@@ -140,7 +82,7 @@ perm_to_str(mode_t mode, char *str) {
     str[7] = (mode & S_IROTH) ? 'r' : '-';
     str[8] = (mode & S_IWOTH) ? 'w' : '-';
     str[9] = (mode & S_IXOTH) ? 'x' : '-';
-    str[10] = '\0';
+    str[10] = '\0';  // this makes our a buffer a cstring
 }
 
 /*
@@ -159,46 +101,62 @@ time_to_str(struct timespec *ts, char *str, size_t len) {
     if (local_tm) {
         strftime(str, len, "%Y-%m-%d %H:%M:%S %Z", local_tm);
     } else {
-        snprintf(str, len, "Unknown Time");
+        // localtime() has to fail for this code to be run
+        snprintf(str, len, "Unknown Time");  // write a fallback into the str
     }
 }
 
 /*
- * Process the Short Table of Contents action.
- * Iterates through the archive to print member filenames.
+ * Process the Table of Contents action (Short and Long).
+ * Iterates through the archive to print member information.
  *
  * @param fd - the file descriptor
  * @param member_count - the number of contained files
  * @param archive_name - the archive to be read
  * @param is_verbose - boolean to track verbose flag
+ * @param is_long - boolean to track if long listing (-T) is requested
  */
 static void 
-do_toc_short(int fd,
-             int member_count, 
-             const char *archive_name, 
-             bool is_verbose) {
-    tarasaur_directory_t *headers = NULL;
-
+do_toc(int fd,
+       int member_count, 
+       const char *archive_name, 
+       bool is_verbose,
+       bool is_long) {
+    
     // 1. SKIP OVER ALL DATA BLOBS FIRST
-    for (int i = 0; i < member_count; i++) {
-        size_t current_member_size = 0; 
+    // The format is [Size][Data]...[Metadata], so we must jump over data
+    for (int i = 0; i < member_count; ++i) {
+        /*
+        How large (in bytes) is the member file
+        being examined on the (i-th) current iteration?
+        */
+        size_t current_member_size = 0;  // this is used to skip data later
 
+        // Read ONLY the size (8 bytes) of the current member
         if (read(fd, &current_member_size, sizeof(size_t)) != sizeof(size_t)) {
             fprintf(stderr, "Error: Failed to read size for member %d\n", i);
             exit(READ_FAIL);
         }
 
+        // Extra diagnostics
         if (is_verbose) {
             fprintf(stderr, "\tskipping over data for member %d of %ld bytes\n", 
                     i, current_member_size);
         }
 
+        /*
+        Our file pointer is now at the beginning of the data
+        */
+
+        // Skip the data body to reach the next size field or directory
         if (NULL != archive_name) {
+            // It is a real file, we can seek efficiently
             if (lseek(fd, current_member_size, SEEK_CUR) == -1) {
                 perror("Lseek failed");
                 exit(READ_FAIL);
             }
         } else {
+            // It is stdin (pipe), we cannot seek. We must read and discard.
             char junk_buf[BUFFER_SIZE];
             size_t bytes_to_skip = current_member_size;
             while (bytes_to_skip > 0) {
@@ -213,157 +171,84 @@ do_toc_short(int fd,
         }
     }
 
-    headers = malloc(sizeof(tarasaur_directory_t) * member_count);
-    if (!headers && member_count > 0) {
-        perror("Memory allocation failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // 2. READ THE DIRECTORY ENTRIES
-    for (int i = 0; i < member_count; i++) {
-        if (read_directory_entry(fd, &headers[i]) != 0) {
-            fprintf(stderr, "Error: Failed to read directory entry %d\n", i);
-            free(headers);
-            exit(READ_FAIL);
-        }
-    }
-
-    // 3. PRINT TABLE OF CONTENTS
+    // 2. PRINT TABLE OF CONTENTS
     printf("Table of contents of tarannosaurus file: \"%s\" with %d members\n",
-           archive_name ? archive_name : "stdin", member_count);
+           archive_name ? archive_name : "stdin", 
+           member_count);
 
-    for (int i = 0; i < member_count; i++) {
-        printf("\tfile name: %s\n", headers[i].tarasaur_name);
-    }
+    // 3. READ AND PRINT THE METADATA ENTRIES
+    // File ptr is now positioned at the beginning of the metadata
+    for (int i = 0; i < member_count; ++i) {
+        tarasaur_directory_t header;  // this is what we read INTO
+        char name_buffer[TARASAUR_MAX_NAME_LEN * 2] = {'\0'};  // any arbitrary size larger than macro
+        memset(name_buffer, 0, sizeof(name_buffer));  // ensure buffer is null-terminated
 
-    free(headers);
-}
-
-/*
- * Process the Long Table of Contents action.
- * Prints detailed metadata (permissions, owner, group, size, time, crc).
- *
- * @param fd - the file descriptor
- * @param member_count - the number of contained files
- * @param archive_name - the archive to be read
- * @param is_verbose - boolean to track verbose flag
- */
-static void 
-do_toc_long(int fd,
-             int member_count, 
-             const char *archive_name, 
-             bool is_verbose) {
-    tarasaur_directory_t *headers = NULL;
-
-    // 1. SKIP OVER ALL DATA BLOBS FIRST (Identical logic to Short TOC)
-    for (int i = 0; i < member_count; i++) {
-        size_t current_member_size = 0; 
-
-        if (read(fd, &current_member_size, sizeof(size_t)) != sizeof(size_t)) {
-            fprintf(stderr, "Error: Failed to read size for member %d\n", i);
-            exit(READ_FAIL);
-        }
-
-        if (is_verbose) {
-            fprintf(stderr, "\tskipping over data for member %d of %ld bytes\n", 
-                    i, current_member_size);
-        }
-
-        if (NULL != archive_name) {
-            if (lseek(fd, current_member_size, SEEK_CUR) == -1) {
-                perror("Lseek failed");
-                exit(READ_FAIL);
-            }
-        } else {
-            char junk_buf[BUFFER_SIZE];
-            size_t bytes_to_skip = current_member_size;
-            while (bytes_to_skip > 0) {
-                size_t read_amt = (bytes_to_skip < sizeof(junk_buf)) 
-                                    ? bytes_to_skip : sizeof(junk_buf);
-                if (read(fd, junk_buf, read_amt) <= 0) {
-                    fprintf(stderr, "Error: Unexpected EOF skipping data\n");
-                    exit(READ_FAIL);
-                }
-                bytes_to_skip -= read_amt;
-            }
-        }
-    }
-
-    headers = malloc(sizeof(tarasaur_directory_t) * member_count);
-    if (!headers && member_count > 0) {
-        perror("Memory allocation failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // 2. READ THE DIRECTORY ENTRIES
-    for (int i = 0; i < member_count; i++) {
-        if (read_directory_entry(fd, &headers[i]) != 0) {
+        // Consume the header in one go
+        if (read(fd,
+                 &header, 
+                 sizeof(tarasaur_directory_t)) != sizeof(tarasaur_directory_t)) {
             fprintf(stderr, "Error: Failed to read directory entry %d\n", i);
-            free(headers);
             exit(READ_FAIL);
         }
-    }
 
-    // 3. PRINT LONG TABLE OF CONTENTS
-    printf("Table of contents of tarannosaurus file: \"%s\" with %d members\n",
-           archive_name ? archive_name : "stdin", member_count);
+        // Safe copy of name to ensure null termination
+        strncpy(name_buffer, header.tarasaur_name, TARASAUR_MAX_NAME_LEN);
+        printf("\tfile name: %s\n", name_buffer);
 
-    for (int i = 0; i < member_count; i++) {
-        char perm_str[11];
-        char time_str[64];
-        struct passwd *pwd;
-        struct group *grp;
+        // If Long TOC is requested, print extra details
+        if (is_long) {
+            char perm_str[PERMISSIONS_LEN];  // read permissions into this string
+            char time_str[TIMESTAMP_LEN];  // read timestamp into this
+            struct passwd *pwd;
+            struct group *grp;
 
-        printf("\tfile name: %s\n", headers[i].tarasaur_name);
-        
-        // Mode
-        perm_to_str(headers[i].tarasaur_mode, perm_str);
-        printf("\t\tmode: \t\t%s\n", perm_str);
+            // Mode
+            perm_to_str(header.tarasaur_mode, perm_str);
+            printf("\t\tmode: \t\t%s\n", perm_str);
 
-        // User
-        pwd = getpwuid(headers[i].tarasaur_uid);
-        if (pwd) {
-            printf("\t\tuser: \t\t%s\n", pwd->pw_name);
-        } else {
-            printf("\t\tuser: \t\t%d\n", headers[i].tarasaur_uid);
+            // User
+            pwd = getpwuid(header.tarasaur_uid);
+            if (pwd) {
+                printf("\t\tuser: \t\t%s\n", pwd->pw_name);
+            } else {
+                printf("\t\tuser: \t\t%d\n", header.tarasaur_uid);
+            }
+
+            // Group
+            grp = getgrgid(header.tarasaur_gid);
+            if (grp) {
+                printf("\t\tgroup: \t\t%s\n", grp->gr_name);
+            } else {
+                printf("\t\tgroup: \t\t%d\n", header.tarasaur_gid);
+            }
+
+            // Size
+            printf("\t\tsize: \t\t%ld\n", header.tarasaur_size);
+
+            // Mtime
+            time_to_str(&header.tarasaur_mtim, time_str, sizeof(time_str));
+            printf("\t\tmtime: \t\t%s\n", time_str);
+
+            // Atime
+            time_to_str(&header.tarasaur_atim, time_str, sizeof(time_str));
+            printf("\t\tatime: \t\t%s\n", time_str);
+
+            // CRC Headers
+            printf("\t\tcrc32 header: \t0x%08x\n", header.crc32_header);
+            printf("\t\tcrc32 data: \t0x%08x\n", header.crc32_data);
         }
-
-        // Group
-        grp = getgrgid(headers[i].tarasaur_gid);
-        if (grp) {
-            printf("\t\tgroup: \t\t%s\n", grp->gr_name);
-        } else {
-            printf("\t\tgroup: \t\t%d\n", headers[i].tarasaur_gid);
-        }
-
-        // Size
-        printf("\t\tsize: \t\t%ld\n", headers[i].tarasaur_size);
-
-        // Mtime
-        time_to_str(&headers[i].tarasaur_mtim, time_str, sizeof(time_str));
-        printf("\t\tmtime: \t\t%s\n", time_str);
-
-        // Atime
-        time_to_str(&headers[i].tarasaur_atim, time_str, sizeof(time_str));
-        printf("\t\tatime: \t\t%s\n", time_str);
-
-        // CRC Headers
-        // Note: Using single tab for longer labels to maintain alignment
-        printf("\t\tcrc32 header: \t0x%08x\n", headers[i].crc32_header);
-        printf("\t\tcrc32 data: \t0x%08x\n", headers[i].crc32_data);
     }
-
-    free(headers);
 }
 
 int
 main(int argc, char *argv[])
 {
-    int opt;
-    char *file_name = NULL;
-    bool is_verbose = false;
-    tarasaur_action_t action = ACTION_NONE;
+    int opt;  // setup for getopt
+    char *file_name = NULL;  // this must be NULL for error handling
+    bool is_verbose = false;  // this activates extra diagnostics
+    tarasaur_action_t action = ACTION_NONE;  // must be default value for error handling
 
+    // Extract the op first - no processing yet
     while ((opt = 
         getopt(argc, argv, "cxtTVf:vh")) != -1)
     {
@@ -402,6 +287,7 @@ main(int argc, char *argv[])
                 is_verbose = true;
                 break;
 
+            // This corresponds to ACTION_NONE - the default value
             default:
                 fprintf(stderr, 
                         "Invalid command line option %c\n", 
@@ -411,62 +297,86 @@ main(int argc, char *argv[])
         }
     }
 
+    // Now we can proceed with processing
     switch (action)
     {
         case ACTION_CREATE:
             {
                 fprintf(stderr, 
-                        "Creating...\n");
+                        "Creating...\n");  // placeholder
+
+                /*
+                TODO: Implement the file creation logic
+                */
             }
             break;
     
+        /*
+        All of these share the same error handling:
+            file open failure,
+            read failures,
+            incorrect magic number,
+            incorrect version number,
+        */
         case ACTION_EXTRACT:
         case ACTION_TOC_SHORT:
         case ACTION_TOC_LONG:
         case ACTION_VALIDATE:
             {
-                char magic_buf[MAGIC_BUF_SIZE] = {0};  // ensure this is null terminated
+                char magic_buf[MAGIC_BUF_SIZE] = {'\0'};  // ensures a null terminator at the end
                 int magic_len = strlen(TARASAUR_MAGIC_NUMBER);
                 short version;
                 int member_count;
                 int fd;
 
+                // Can we open the file? Was a file even provided?
                 if (file_name) {
                     fd = open(file_name, O_RDONLY);
                     if (-1 == fd) {
                         perror("Error opening archive");
                         exit(EXIT_FAILURE);
                     }
-                    // Only print for files if verbose (based on your previous output)
+                    // Extra diagnostics
                     if (is_verbose) {
                         fprintf(stderr, 
                                 "Reading archive file: \"%s\"\n", 
                                 file_name);
                     }
                 }
+                // No file provided - default to read from STDIN
                 else {
                     fd = STDIN_FILENO;
-                    // Instructor's code prints this unconditionally for stdin
                     fprintf(stderr, 
                             "Reading archive from stdin\n");
                 }
 
                 // --- HEADER VALIDATION START ---
+
+                /*
+                There are three parts of the header:
+
+                    Magic Number,
+                    Version Number,
+                    Member Count
+
+                We verify the Magic Number and Version Number
+                */
                 
-                // 1. Verify Magic Number
+                // Verify Magic Number (from the header file)
                 if (read(fd, magic_buf, magic_len) != magic_len) {
                      fprintf(stderr,
                              "*** failed to read magic number\n");
                      exit(BAD_MAGIC);
                 }
                 
+                // Wrong file type
                 if (strcmp(magic_buf, TARASAUR_MAGIC_NUMBER) != 0) {
                     fprintf(stderr, "Not a tarannosaurus file: \"%s\"\n", 
                             file_name ? file_name : "stdin");
                     exit(BAD_MAGIC);
                 }
 
-                // 2. Verify Version
+                // Verify Version (from the header file)
                 if (read(fd, &version, sizeof(short)) != sizeof(short)) {
                     fprintf(stderr, "Error: Failed to read version\n");
                     exit(BAD_MAGIC);
@@ -488,11 +398,11 @@ main(int argc, char *argv[])
                 // Dispatch to specific handlers
                 switch (action) {
                     case ACTION_TOC_SHORT:
-                        do_toc_short(fd, member_count, file_name, is_verbose);
+                        do_toc(fd, member_count, file_name, is_verbose, false);
                         break;
                     
                     case ACTION_TOC_LONG:
-                        do_toc_long(fd, member_count, file_name, is_verbose);
+                        do_toc(fd, member_count, file_name, is_verbose, true);
                         break;
                     
                     case ACTION_EXTRACT:
