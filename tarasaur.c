@@ -3,7 +3,7 @@
  * @brief       An archiver program
  * @author      Alejandro Alvarado
  * @course      Intro to Operating Systems - CS333-006
- * @date        January 28, 2026
+ * @date        January 30, 2026
  *
  * @details 
  * This program performs two essential functions: reading
@@ -463,6 +463,163 @@ do_validate(int fd,
     }
 }
 
+/*
+ * Extract files from an archive and restore their metadata.
+ *
+ * @param fd - the file descriptor
+ * @param member_count - the number of contained files
+ * @param archive_name - the archive to extract from (NULL if stdin)
+ * @param is_verbose - boolean to track verbose flag
+ */
+static void
+do_extract(int fd,
+           int member_count,
+           const char *archive_name,
+           bool is_verbose) {
+
+    tarasaur_directory_t *headers = NULL;
+    size_t *data_sizes = NULL;
+
+    // Allocate arrays for metadata and data sizes
+    headers = calloc(member_count, sizeof(tarasaur_directory_t));
+    if (!headers) {
+        perror("calloc");
+        exit(EXIT_FAILURE);
+    }
+
+    data_sizes = calloc(member_count, sizeof(size_t));
+    if (!data_sizes) {
+        perror("calloc");
+        free(headers);
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 1: Skip over all data sections while collecting sizes
+    for (int i = 0; i < member_count; ++i) {
+        // Read size of this member's data
+        if (read(fd, &data_sizes[i], sizeof(size_t)) != sizeof(size_t)) {
+            fprintf(stderr, "Error: Failed to read size for member %d\n", i);
+            free(headers);
+            free(data_sizes);
+            exit(READ_FAIL);
+        }
+
+        // Skip past the data blob
+        if (archive_name) {
+            // Regular file - can seek
+            if (lseek(fd, data_sizes[i], SEEK_CUR) == -1) {
+                perror("lseek");
+                free(headers);
+                free(data_sizes);
+                exit(READ_FAIL);
+            }
+        } else {
+            // Pipe/stdin - must read and discard
+            read_stdin(fd, data_sizes[i]);
+        }
+    }
+
+    // Step 2: Read all metadata structures
+    for (int i = 0; i < member_count; ++i) {
+        if (read(fd, &headers[i], sizeof(tarasaur_directory_t))
+            != sizeof(tarasaur_directory_t)) {
+            fprintf(stderr, "Error: Failed to read directory entry %d\n", i);
+            free(headers);
+            free(data_sizes);
+            exit(READ_FAIL);
+        }
+    }
+
+    // Step 3: Extract each member
+    for (int i = 0; i < member_count; ++i) {
+        char buffer[BUFFER_SIZE];
+        int out_fd;
+        size_t remaining;
+        struct timespec times[2];
+
+        // Verbose output to stderr
+        if (is_verbose) {
+            fprintf(stderr, "\tExtracting member data: %s   size: %10zd\n",
+                    headers[i].tarasaur_name, data_sizes[i]);
+        }
+
+        // Create output file
+        out_fd = open(headers[i].tarasaur_name,
+                      O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (out_fd == -1) {
+            perror("open");
+            free(headers);
+            free(data_sizes);
+            exit(EXTRACT_FAIL);
+        }
+
+        // Seek to data location using tarasaur_data_offset
+        if (lseek(fd, headers[i].tarasaur_data_offset, SEEK_SET) == -1) {
+            perror("lseek");
+            close(out_fd);
+            free(headers);
+            free(data_sizes);
+            exit(READ_FAIL);
+        }
+
+        // Read and write data in chunks
+        remaining = data_sizes[i];
+        while (remaining > 0) {
+            size_t to_read = MIN(remaining, sizeof(buffer));
+            ssize_t bytes_read = read(fd, buffer, to_read);
+
+            if (bytes_read <= 0) {
+                fprintf(stderr, "Error: Failed to read data for member %d\n", i);
+                close(out_fd);
+                free(headers);
+                free(data_sizes);
+                exit(READ_FAIL);
+            }
+
+            if (write(out_fd, buffer, bytes_read) != bytes_read) {
+                perror("write");
+                close(out_fd);
+                free(headers);
+                free(data_sizes);
+                exit(EXTRACT_FAIL);
+            }
+
+            remaining -= bytes_read;
+        }
+
+        // Close output file
+        close(out_fd);
+
+        // Restore permissions
+        if (chmod(headers[i].tarasaur_name, headers[i].tarasaur_mode) == -1) {
+            perror("chmod");
+            // Continue extraction even if chmod fails
+        }
+
+        // Restore timestamps
+        times[0] = headers[i].tarasaur_atim;  // Access time
+        times[1] = headers[i].tarasaur_mtim;  // Modification time
+        if (utimensat(AT_FDCWD, headers[i].tarasaur_name, times, 0) == -1) {
+            perror("utimensat");
+            // Continue extraction even if utimensat fails
+        }
+    }
+
+    // Print extraction summary to stdout
+    printf("Extracting contents of tarannosaurus file: \"%s\" with %d members\n",
+           archive_name ? archive_name : "stdin",
+           member_count);
+
+    // Cleanup
+    free(headers);
+    free(data_sizes);
+
+    // Close archive if not stdin
+    if (archive_name) {
+        close(fd);
+    }
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -560,12 +717,10 @@ main(int argc, char *argv[])
                         perror("Error opening archive");
                         exit(EXIT_FAILURE);
                     }
-                    // Extra diagnostics
-                    if (is_verbose) {
-                        fprintf(stderr, 
-                                "Reading archive file: \"%s\"\n", 
-                                file_name);
-                    }
+                    // Print message for all operations
+                    fprintf(stderr,
+                            "Reading archive file: \"%s\"\n",
+                            file_name);
                 }
                 // No file provided - default to read from STDIN
                 else {
@@ -630,7 +785,7 @@ main(int argc, char *argv[])
                         break;
 
                     case ACTION_EXTRACT:
-                        // do_extract(fd, member_count, file_name, is_verbose);
+                        do_extract(fd, member_count, file_name, is_verbose);
                         break;
 
                     case ACTION_VALIDATE:
