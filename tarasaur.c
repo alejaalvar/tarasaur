@@ -267,22 +267,200 @@ do_toc(int fd,
     }
 }
 
-static void 
-do_validate(int fd, 
-            int member_count, 
-            const char *archive_name, 
-            bool is_verbose) {
-    // TODO: implement
+/*
+ * Calculate CRC32 checksum for a block of data using zlib.
+ *
+ * @param data - pointer to the data buffer
+ * @param size - size of the data in bytes
+ * @return The calculated CRC32 checksum
+ */
+static uint32_t
+get_crc(const void *data, size_t size) {
+    uint32_t crc = crc32(0L, Z_NULL, 0);  // Initialize zlib CRC state
+    crc = crc32(crc, (const Bytef *)data, size);  // Calculate CRC
+    return crc;
+}
 
-    /*
-    Algorithm:
-        Skip past the header, file size, and data blobs
-        Stop at the beginning of the metadata
-        Read the crc value
-        compare the crc value to our computed one
-                if they are the same, success
-                if they are not the same, failure (VALIDATE_ERROR)
-    */
+/*
+ * Validate CRC32 checksums for all archive members.
+ * Checks both header and data CRCs for each member.
+ *
+ * @param fd - the file descriptor
+ * @param member_count - the number of contained files
+ * @param archive_name - the archive to be validated (NULL if stdin)
+ * @param is_verbose - boolean to track verbose flag
+ * @return EXIT_SUCCESS if all validations pass, VALIDATE_ERROR otherwise
+ */
+static int
+do_validate(int fd,
+            int member_count,
+            const char *archive_name,
+            bool is_verbose) {
+
+    tarasaur_directory_t *headers = NULL;
+    size_t *data_sizes = NULL;
+    int validation_errors = 0;
+
+    // Allocate arrays for metadata and data sizes
+    headers = calloc(member_count, sizeof(tarasaur_directory_t));
+    if (!headers) {
+        perror("calloc");
+        exit(EXIT_FAILURE);
+    }
+
+    data_sizes = calloc(member_count, sizeof(size_t));
+    if (!data_sizes) {
+        perror("calloc");
+        free(headers);
+        exit(EXIT_FAILURE);
+    }
+
+    // Print initial message to stderr
+    if (archive_name) {
+        fprintf(stderr, "Validating archive file: \"%s\"\n", archive_name);
+    } else {
+        fprintf(stderr, "Validating archive from stdin\n");
+    }
+
+    // Step 1: Skip over all data sections while collecting sizes
+    for (int i = 0; i < member_count; ++i) {
+        // Read size of this member's data
+        if (read(fd, &data_sizes[i], sizeof(size_t)) != sizeof(size_t)) {
+            fprintf(stderr, "Error: Failed to read size for member %d\n", i);
+            free(headers);
+            free(data_sizes);
+            exit(READ_FAIL);
+        }
+
+        // Verbose output
+        if (is_verbose) {
+            fprintf(stderr, "\tChecking data for member %d of %zd bytes\n",
+                    i, data_sizes[i]);
+        }
+
+        // Skip past the data blob
+        if (archive_name) {
+            // Regular file - can seek
+            if (lseek(fd, data_sizes[i], SEEK_CUR) == -1) {
+                perror("lseek");
+                free(headers);
+                free(data_sizes);
+                exit(READ_FAIL);
+            }
+        } else {
+            // Pipe/stdin - must read and discard
+            read_stdin(fd, data_sizes[i]);
+        }
+    }
+
+    // Step 2: Read all metadata structures
+    for (int i = 0; i < member_count; ++i) {
+        if (read(fd, &headers[i], sizeof(tarasaur_directory_t))
+            != sizeof(tarasaur_directory_t)) {
+            fprintf(stderr, "Error: Failed to read directory entry %d\n", i);
+            free(headers);
+            free(data_sizes);
+            exit(READ_FAIL);
+        }
+    }
+
+    // Step 3: Validate each member
+    for (int i = 0; i < member_count; ++i) {
+        void *data_buffer = NULL;
+        uint32_t calculated_data_crc;
+        uint32_t calculated_header_crc;
+        uint32_t stored_data_crc;
+        uint32_t stored_header_crc;
+        int data_valid;
+        int header_valid;
+        tarasaur_directory_t header_copy;
+
+        // --- Validate Data CRC ---
+
+        // Seek to data location using tarasaur_data_offset
+        if (lseek(fd, headers[i].tarasaur_data_offset, SEEK_SET) == -1) {
+            perror("lseek");
+            free(headers);
+            free(data_sizes);
+            exit(READ_FAIL);
+        }
+
+        // Allocate buffer for data
+        data_buffer = malloc(data_sizes[i]);
+        if (!data_buffer) {
+            perror("malloc");
+            free(headers);
+            free(data_sizes);
+            exit(EXIT_FAILURE);
+        }
+
+        // Read the data
+        if (read(fd, data_buffer, data_sizes[i]) != (ssize_t)data_sizes[i]) {
+            fprintf(stderr, "Error: Failed to read data for member %d\n", i);
+            free(data_buffer);
+            free(headers);
+            free(data_sizes);
+            exit(READ_FAIL);
+        }
+
+        // Calculate data CRC
+        calculated_data_crc = get_crc(data_buffer, data_sizes[i]);
+        stored_data_crc = headers[i].crc32_data;
+        data_valid = (calculated_data_crc == stored_data_crc);
+
+        // --- Validate Header CRC ---
+
+        // Make a copy of the header
+        header_copy = headers[i];
+
+        // CRITICAL: Zero out the CRC fields before calculating
+        header_copy.crc32_data = 0;
+        header_copy.crc32_header = 0;
+
+        // Calculate header CRC
+        calculated_header_crc = get_crc(&header_copy, sizeof(tarasaur_directory_t));
+        stored_header_crc = headers[i].crc32_header;
+        header_valid = (calculated_header_crc == stored_header_crc);
+
+        // --- Print Results ---
+
+        // Print member name (padded to 25 chars)
+        fprintf(stdout, "Archive member: %-25s\n", headers[i].tarasaur_name);
+
+        // Print header validation result
+        fprintf(stdout, "\theader: file 0x%08x      calculated 0x%08x  %s\n",
+                stored_header_crc, calculated_header_crc,
+                header_valid ? "***   valid ***" : "*** INVALID ***");
+
+        // Print data validation result
+        fprintf(stdout, "\tdata:   file 0x%08x      calculated 0x%08x  %s\n",
+                stored_data_crc, calculated_data_crc,
+                data_valid ? "***   valid ***" : "*** INVALID ***");
+
+        // Track errors
+        if (!header_valid || !data_valid) {
+            ++validation_errors;
+        }
+
+        // Clean up data buffer
+        free(data_buffer);
+    }
+
+    // Cleanup
+    free(headers);
+    free(data_sizes);
+
+    // Close file if not stdin
+    if (archive_name) {
+        close(fd);
+    }
+
+    // Return appropriate exit code
+    if (validation_errors > 0) {
+        return VALIDATE_ERROR;
+    } else {
+        return EXIT_SUCCESS;
+    }
 }
 
 int
@@ -446,20 +624,19 @@ main(int argc, char *argv[])
                     case ACTION_TOC_SHORT:
                         do_toc(fd, member_count, file_name, is_verbose, false);
                         break;
-                    
+
                     case ACTION_TOC_LONG:
                         do_toc(fd, member_count, file_name, is_verbose, true);
                         break;
-                    
+
                     case ACTION_EXTRACT:
                         // do_extract(fd, member_count, file_name, is_verbose);
                         break;
-                    
+
                     case ACTION_VALIDATE:
-                        // do_validate(fd, member_count, file_name, is_verbose);
-                        break;
-                        
-                    default: 
+                        return do_validate(fd, member_count, file_name, is_verbose);
+
+                    default:
                         break;
                 }
 
