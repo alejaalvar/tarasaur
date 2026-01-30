@@ -267,6 +267,24 @@ do_toc(int fd,
     }
 }
 
+static void 
+do_validate(int fd, 
+            int member_count, 
+            const char *archive_name, 
+            bool is_verbose) {
+    // TODO: implement
+
+    /*
+    Algorithm:
+        Skip past the header, file size, and data blobs
+        Stop at the beginning of the metadata
+        Read the crc value
+        compare the crc value to our computed one
+                if they are the same, success
+                if they are not the same, failure (VALIDATE_ERROR)
+    */
+}
+
 int
 main(int argc, char *argv[])
 {
