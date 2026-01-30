@@ -843,19 +843,20 @@ do_create(const char *archive_name,
           int num_files,
           bool is_verbose) {
 
-    tarasaur_directory_t *headers = NULL;
-    size_t *file_sizes = NULL;
+    tarasaur_directory_t *headers = NULL;  // temp holding space so we can write TO the archive
+    size_t *file_sizes = NULL;  // track every input file's size
     int archive_fd;
-    off_t current_offset;
+    off_t current_offset;  // we will write this offset into the archive
     int i;
     short version;
-    struct stat st;
-    int file_fd;
-    char buffer[BUFFER_SIZE];
-    size_t remaining;
+    struct stat st;  // the buffer we read into from fstat
+    int file_fd;  // this is where we extract our data blobs from
+    char buffer[BUFFER_SIZE];  // read data from file into this buffer
+    size_t remaining;  // used to calculate the correct num of bytes to read
     void *file_data;
     size_t bytes_read_total;
-    tarasaur_directory_t header_copy;
+    tarasaur_directory_t header_copy;  // necessary so we can compare, 
+                                       // and void circular dependency
 
     // Validate inputs
     if (!archive_name) {
@@ -883,6 +884,12 @@ do_create(const char *archive_name,
     }
 
     // Pass 1: Collect file metadata and calculate offsets
+
+    /*
+    Visualize the structure of the archive:
+        length of magic num + sizeof(version_number) + sizeof(num_files)
+        strlen # bytes + 2 bytes + 4 bytes
+    */
     current_offset = strlen(TARASAUR_MAGIC_NUMBER) + sizeof(short) + sizeof(int);
 
     for (i = 0; i < num_files; ++i) {
@@ -915,15 +922,21 @@ do_create(const char *archive_name,
         }
 
         // Store file size
-        file_sizes[i] = st.st_size;
+        file_sizes[i] = st.st_size;  // used to calculate the offset
 
         // Calculate data offset for this file
+
+        /*
+        Remember that after the int (4 bytes) that stores the
+        number of members, there is a size_t (8 bytes) that stores
+        the number of bytes of member data
+        */
         headers[i].tarasaur_data_offset = current_offset + sizeof(size_t);
-        current_offset = headers[i].tarasaur_data_offset + st.st_size;
+        current_offset = headers[i].tarasaur_data_offset + st.st_size;  // we now have the offset value
 
         // Store filename (truncate if necessary)
         strncpy(headers[i].tarasaur_name, file_list[i], TARASAUR_MAX_NAME_LEN - 1);
-        headers[i].tarasaur_name[TARASAUR_MAX_NAME_LEN - 1] = '\0';
+        headers[i].tarasaur_name[TARASAUR_MAX_NAME_LEN - 1] = '\0';  // make sure it is a cstring
 
         // Store metadata
         headers[i].tarasaur_size = st.st_size;
@@ -978,7 +991,7 @@ do_create(const char *archive_name,
         exit(CREATE_FAIL);
     }
 
-    // Pass 2: Write data section and calculate data CRCs
+    // Pass 2: Write data sections and calculate data CRCs
     for (i = 0; i < num_files; ++i) {
         file_data = NULL;
         bytes_read_total = 0;
@@ -1023,6 +1036,9 @@ do_create(const char *archive_name,
         // Read and write file data
         remaining = file_sizes[i];
         while (remaining > 0) {
+            /*
+            We use MIN to read the correct amount of bytes
+            */
             size_t to_read = MIN(remaining, sizeof(buffer));
             ssize_t bytes_read = read(file_fd, buffer, to_read);
 
@@ -1038,7 +1054,17 @@ do_create(const char *archive_name,
 
             // Copy to file_data buffer for CRC calculation
             if (file_data) {
-                memcpy((char *)file_data + bytes_read_total, buffer, bytes_read);
+                /*
+                Pointer arithmetic to update the destination we
+                read to based on our iteration. We "move forward"
+                by the amount of bytes_read_total
+
+                Aka, give me the address that is bytes_read_total
+                bytes after the start of file_data
+                */
+                memcpy((char *)file_data + bytes_read_total, 
+                       buffer, 
+                       bytes_read);
                 bytes_read_total += bytes_read;
             }
 
@@ -1059,7 +1085,7 @@ do_create(const char *archive_name,
         close(file_fd);
 
         // Calculate data CRC
-        if (file_sizes[i] > 0) {
+        if (file_sizes[i] > 0) {  // does the file have content?
             headers[i].crc32_data = get_crc(file_data, file_sizes[i]);
             free(file_data);
         } else {
@@ -1070,10 +1096,20 @@ do_create(const char *archive_name,
     // Pass 3: Write metadata section with header CRCs
     for (i = 0; i < num_files; ++i) {
         // Calculate header CRC (must zero out CRC fields first)
+
+        /*
+        We use a header copy because we need to zero out
+        the crc fields, but in order to calculate the header
+        crc value, we need the crc value we just calculated.
+
+        The only way around this is to use a temporary so we
+        do not lose the data crc value we just computed
+        */
         header_copy = headers[i];
         header_copy.crc32_data = 0;
         header_copy.crc32_header = 0;
-        headers[i].crc32_header = get_crc(&header_copy, sizeof(tarasaur_directory_t));
+        headers[i].crc32_header = get_crc(&header_copy, 
+                                          sizeof(tarasaur_directory_t));
 
         // Write header
         if (write(archive_fd, &headers[i], sizeof(tarasaur_directory_t))
@@ -1087,7 +1123,8 @@ do_create(const char *archive_name,
     }
 
     // Print summary
-    printf("Created archive file: \"%s\" with %d members\n", archive_name, num_files);
+    printf("Created archive file: \"%s\" with %d members\n", 
+            archive_name, num_files);
 
     // Cleanup
     close(archive_fd);
