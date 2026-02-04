@@ -1124,9 +1124,11 @@ do_create(const char *archive_name,
         }
     }
 
-    // Print summary
-    printf("Created archive file: \"%s\" with %d members\n",
-            archive_name ? archive_name : "stdout", num_files);
+    // Print summary (only if writing to a file, not stdout)
+    if (archive_name) {
+        printf("Created archive file: \"%s\" with %d members\n",
+                archive_name, num_files);
+    }
 
     // Cleanup
     if (archive_fd != STDOUT_FILENO) close(archive_fd);
