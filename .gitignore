@@ -25,3 +25,16 @@ a.out
 
 # Ignore pdf files
 *.pdf
+
+# Test droppings
+*.out
+*.err
+*.diff
+*.bin
+*.ltoc
+*.stoc
+*.md5
+*.ls
+big_arch
+jar_ex
+sar_ex

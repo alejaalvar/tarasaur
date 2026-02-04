@@ -62,23 +62,18 @@
 
 /*
  * Display help info for usage of tarasaur
- *
- * @param program_name - the name of the program from argv
  */
-static void 
-usage(const char *program_name) {
-    fprintf(stderr, 
-            "Usage: %s -[%s] archive-file file...\n"
-            "        -c           create a new archive file\n"
-            "        -x           extract members from an existing archive file\n"
-            "        -t           short table of contents of archive file\n"
-            "        -T           long table of contents of archive file\n"
-            "        -V           validate the checksum/hash values\n"
-            "        -f filename  name of archive file to use\n"
-            "        -v           verbose output\n"
-            "        -h           show help text\n",
-            program_name, OPTIONS);
-    return;
+static void
+usage(void) {
+    printf("Usage: tarasaur -[cxtTVf:vh] archive-file file...\n");
+    printf("\t-c           create a new archive file\n");
+    printf("\t-x           extract members from an existing archive file\n");
+    printf("\t-t           short table of contents of archive file\n");
+    printf("\t-T           long table of contents of archive file\n");
+    printf("\t-V           validate the checksum/hash values\n");
+    printf("\t-f filename  name of archive file to use\n");
+    printf("\t-v           verbose output\n");
+    printf("\t-h           show help text\n");
 }
 
 /*
@@ -758,7 +753,7 @@ parse_command_line_options(int argc,
                 break;
 
             case 'h':
-                usage(argv[0]);
+                usage();
                 exit(EXIT_SUCCESS);
                 break;
 
@@ -866,11 +861,6 @@ do_create(const char *archive_name,
                                        // and void circular dependency
 
     // Validate inputs
-    if (!archive_name) {
-        fprintf(stderr, "Error: No archive filename specified\n");
-        exit(NO_ARCHIVE_NAME);
-    }
-
     if (num_files == 0) {
         fprintf(stderr, "Error: No files specified to archive\n");
         exit(CREATE_FAIL);
@@ -942,8 +932,7 @@ do_create(const char *archive_name,
         current_offset = headers[i].tarasaur_data_offset + st.st_size;  // we now have the offset value
 
         // Store filename (truncate if necessary)
-        strncpy(headers[i].tarasaur_name, file_list[i], TARASAUR_MAX_NAME_LEN - 1);
-        headers[i].tarasaur_name[TARASAUR_MAX_NAME_LEN - 1] = '\0';  // make sure it is a cstring
+        strncpy(headers[i].tarasaur_name, file_list[i], TARASAUR_MAX_NAME_LEN);
 
         // Store metadata
         headers[i].tarasaur_size = st.st_size;
@@ -958,24 +947,30 @@ do_create(const char *archive_name,
         headers[i].crc32_header = 0;
     }
 
-    // Open archive file for writing
-    archive_fd = open(archive_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (archive_fd == -1) {
-        perror(archive_name);
-        free(headers);
-        free(file_sizes);
-        exit(CREATE_FAIL);
-    }
-
-    if (is_verbose) {
-        fprintf(stderr, "Creating archive file: \"%s\"\n", archive_name);
+    // Open archive file for writing (or use stdout if no filename given)
+    if (archive_name) {
+        archive_fd = open(archive_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (archive_fd == -1) {
+            perror(archive_name);
+            free(headers);
+            free(file_sizes);
+            exit(CREATE_FAIL);
+        }
+        if (is_verbose) {
+            fprintf(stderr, "Creating archive file: \"%s\"\n", archive_name);
+        }
+    } else {
+        archive_fd = STDOUT_FILENO;
+        if (is_verbose) {
+            fprintf(stderr, "Creating archive file: \"stdout\"\n");
+        }
     }
 
     // Write header: magic number, version, member count
     if (write(archive_fd, TARASAUR_MAGIC_NUMBER, strlen(TARASAUR_MAGIC_NUMBER))
         != (ssize_t)strlen(TARASAUR_MAGIC_NUMBER)) {
         perror("write");
-        close(archive_fd);
+        if (archive_fd != STDOUT_FILENO) close(archive_fd);
         free(headers);
         free(file_sizes);
         exit(CREATE_FAIL);
@@ -984,7 +979,7 @@ do_create(const char *archive_name,
     version = TARASAUR_VERSION;
     if (write(archive_fd, &version, sizeof(short)) != sizeof(short)) {
         perror("write");
-        close(archive_fd);
+        if (archive_fd != STDOUT_FILENO) close(archive_fd);
         free(headers);
         free(file_sizes);
         exit(CREATE_FAIL);
@@ -992,7 +987,7 @@ do_create(const char *archive_name,
 
     if (write(archive_fd, &num_files, sizeof(int)) != sizeof(int)) {
         perror("write");
-        close(archive_fd);
+        if (archive_fd != STDOUT_FILENO) close(archive_fd);
         free(headers);
         free(file_sizes);
         exit(CREATE_FAIL);
@@ -1011,7 +1006,7 @@ do_create(const char *archive_name,
         // Write size
         if (write(archive_fd, &file_sizes[i], sizeof(size_t)) != sizeof(size_t)) {
             perror("write");
-            close(archive_fd);
+            if (archive_fd != STDOUT_FILENO) close(archive_fd);
             free(headers);
             free(file_sizes);
             exit(CREATE_FAIL);
@@ -1021,7 +1016,7 @@ do_create(const char *archive_name,
         file_fd = open(file_list[i], O_RDONLY);
         if (file_fd == -1) {
             perror(file_list[i]);
-            close(archive_fd);
+            if (archive_fd != STDOUT_FILENO) close(archive_fd);
             free(headers);
             free(file_sizes);
             exit(CREATE_FAIL);
@@ -1033,7 +1028,7 @@ do_create(const char *archive_name,
             if (!file_data) {
                 perror("malloc");
                 close(file_fd);
-                close(archive_fd);
+                if (archive_fd != STDOUT_FILENO) close(archive_fd);
                 free(headers);
                 free(file_sizes);
                 exit(EXIT_FAILURE);
@@ -1053,7 +1048,7 @@ do_create(const char *archive_name,
                 fprintf(stderr, "Error: Failed to read from %s\n", file_list[i]);
                 free(file_data);
                 close(file_fd);
-                close(archive_fd);
+                if (archive_fd != STDOUT_FILENO) close(archive_fd);
                 free(headers);
                 free(file_sizes);
                 exit(READ_FAIL);
@@ -1080,7 +1075,7 @@ do_create(const char *archive_name,
                 perror("write");
                 free(file_data);
                 close(file_fd);
-                close(archive_fd);
+                if (archive_fd != STDOUT_FILENO) close(archive_fd);
                 free(headers);
                 free(file_sizes);
                 exit(CREATE_FAIL);
@@ -1122,7 +1117,7 @@ do_create(const char *archive_name,
         if (write(archive_fd, &headers[i], sizeof(tarasaur_directory_t))
             != sizeof(tarasaur_directory_t)) {
             perror("write");
-            close(archive_fd);
+            if (archive_fd != STDOUT_FILENO) close(archive_fd);
             free(headers);
             free(file_sizes);
             exit(CREATE_FAIL);
@@ -1130,11 +1125,11 @@ do_create(const char *archive_name,
     }
 
     // Print summary
-    printf("Created archive file: \"%s\" with %d members\n", 
-            archive_name, num_files);
+    printf("Created archive file: \"%s\" with %d members\n",
+            archive_name ? archive_name : "stdout", num_files);
 
     // Cleanup
-    close(archive_fd);
+    if (archive_fd != STDOUT_FILENO) close(archive_fd);
     free(headers);
     free(file_sizes);
 }
